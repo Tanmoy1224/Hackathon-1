@@ -1,0 +1,8 @@
+streamlit
+streamlit-webrtc
+opencv-python-headless
+mediapipe
+protobuf<=3.20.3
+torch
+numpy
+av
