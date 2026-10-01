@@ -28,7 +28,7 @@ export default function App() {
   const [hazardActive, setHazardActive] = useState(false);
 
   const earThreshold = 0.22;
-  const marThreshold = 0.38;
+  const marThreshold = 0.28;
   const frameThreshold = 40;
 
   const audioCtxRef = useRef(null);

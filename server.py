@@ -202,9 +202,11 @@ async def telemetry_feed(websocket: WebSocket):
                         eye_closed_start_time = None
                         alertness_score = min(100, alertness_score + 1)
 
-                    # Robust Yawn Detection
+                    # --- SENSITIVE & NATURAL YAWN DETECTION ---
                     if not is_microsleep:
-                        geometric_yawn = (mar >= 0.38) and (v_dist >= (0.32 * h_dist))
+                        # Lowered from 0.38 to 0.28 and ratio from 0.32 to 0.22
+                        geometric_yawn = (mar >= 0.28) and (v_dist >= (0.22 * h_dist))
+                        
                         model_yawn = False
                         if len(frame_buffer) == BUFFER_SIZE:
                             input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
@@ -213,15 +215,17 @@ async def telemetry_feed(websocket: WebSocket):
                                 pred_class = int(torch.argmax(torch.softmax(logits, dim=1), dim=1).item())
                             model_yawn = (pred_class == 2)
 
-                        if geometric_yawn or (model_yawn and mar >= 0.33):
+                        # Triggers on comfortable mouth opening
+                        if geometric_yawn or (model_yawn and mar >= 0.25):
                             yawn_consecutive_frames += 1
-                            if yawn_consecutive_frames >= 6 and not currently_yawning:
+                            if yawn_consecutive_frames >= 4 and not currently_yawning:
                                 yawn_timestamps.append(current_time)
                                 currently_yawning = True
-                                print(f"[EVENT] Yawn recorded: {len(yawn_timestamps)}/3")
+                                print(f"[EVENT] Yawn recorded: {len(yawn_timestamps)}/3 (MAR: {mar:.3f})")
                         else:
                             yawn_consecutive_frames = 0
-                            if mar < 0.28:
+                            # Reset flag once mouth closes back below 0.24
+                            if mar < 0.24:
                                 currently_yawning = False
 
                     if len(yawn_timestamps) >= 3 and not yawn_alarm_active:
