@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldAlert, Eye, Activity, Zap, Terminal, AlertTriangle, 
-  Volume2, VolumeX, Flame, BellRing, Radio, Compass, TrendingUp, ChevronDown, 
-  Disc, Gauge, AlertOctagon, TriangleAlert
+  Volume2, VolumeX, Flame, BellRing, Radio, Compass, TrendingUp, ChevronDown, Camera
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -23,14 +22,6 @@ export default function App() {
   const [telemetryHistory, setTelemetryHistory] = useState([]);
   const [cameraActive, setCameraActive] = useState(false);
 
-  // Autonomous Braking Telemetry States
-  const [unresponsiveTime, setUnresponsiveTime] = useState(0.0);
-  const [brakePressure, setBrakePressure] = useState(0);
-  const [vehicleSpeed, setVehicleSpeed] = useState(80);
-  const [canCommand, setCanCommand] = useState("0x018 [SYS_STANDBY]");
-  const [interventionStage, setInterventionStage] = useState("CRUISE");
-  const [hazardActive, setHazardActive] = useState(false);
-
   const earThreshold = 0.22;
   const marThreshold = 0.45;
   const frameThreshold = 45;
@@ -41,6 +32,7 @@ export default function App() {
   const gainNodeRef = useRef(null);
   const isPlayingRef = useRef(false);
 
+  // Hidden video and canvas elements for client camera capture
   const localVideoRef = useRef(null);
   const hiddenCanvasRef = useRef(null);
   const socketRef = useRef(null);
@@ -124,6 +116,7 @@ export default function App() {
     return () => stopAlarmSound();
   }, [isMicrosleep, isYawnWarning, alertnessScore, audioMuted]);
 
+  // Request browser camera on whoever's computer visits the link
   useEffect(() => {
     async function startClientCamera() {
       try {
@@ -137,6 +130,7 @@ export default function App() {
         }
       } catch (err) {
         console.error("Camera access error:", err);
+        alert("Camera access denied or unavailable. Please allow camera permissions in your browser.");
       }
     }
     startClientCamera();
@@ -148,18 +142,21 @@ export default function App() {
     };
   }, []);
 
+  // WebSocket Connection & Frame Streaming Loop
   useEffect(() => {
     let socket;
     let frameTimes = [];
     let frameInterval = null;
 
     const connectWs = () => {
+      // Points to your active ngrok tunnel
       socket = new WebSocket('wss://guidable-imprecise-canine.ngrok-free.dev/ws/telemetry');
       socketRef.current = socket;
 
       socket.onopen = () => {
         setWsConnected(true);
 
+        // Start sending client's browser video frames every 50ms (~20 FPS)
         frameInterval = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN && localVideoRef.current && hiddenCanvasRef.current) {
             const video = localVideoRef.current;
@@ -200,17 +197,9 @@ export default function App() {
           if (data.head_down !== undefined) setIsHeadDown(data.head_down);
           if (data.frame) setCamFrame(data.frame);
 
-          // Braking & CAN-Bus telemetry values
-          if (data.unresponsive_time !== undefined) setUnresponsiveTime(data.unresponsive_time);
-          if (data.brake_pressure !== undefined) setBrakePressure(data.brake_pressure);
-          if (data.vehicle_speed !== undefined) setVehicleSpeed(data.vehicle_speed);
-          if (data.can_command !== undefined) setCanCommand(data.can_command);
-          if (data.intervention_stage !== undefined) setInterventionStage(data.intervention_stage);
-          if (data.hazard_active !== undefined) setHazardActive(data.hazard_active);
-
           const timeLabel = new Date().toLocaleTimeString().split(' ')[0];
           setTelemetryHistory(prev => [
-            ...prev.slice(-24), 
+            ...prev.slice(-29), 
             {
               time: timeLabel,
               EAR: currentEar,
@@ -242,17 +231,16 @@ export default function App() {
   }, []);
 
   const getSystemStatus = () => {
-    if (interventionStage === 'SAFE_STOP') return { text: "CRITICAL: SAFE-STOP ENGAGED", color: "text-red-500", border: "border-red-500", bg: "bg-red-950/60" };
-    if (interventionStage === 'HAPTIC_JOLT') return { text: "ACTUATING: HAPTIC JOLT (3X)", color: "text-amber-500", border: "border-amber-500", bg: "bg-amber-950/60" };
-    if (isMicrosleep) return { text: "PRE-BRAKE: UNRESPONSIVE", color: "text-orange-500", border: "border-orange-500", bg: "bg-orange-950/60" };
+    if (isMicrosleep) return { text: "CRITICAL: MICROSLEEP", color: "text-red-500", border: "border-red-500", bg: "bg-red-950/60" };
     if (isYawnWarning) return { text: "FATIGUE: FREQUENT YAWN", color: "text-amber-500", border: "border-amber-500", bg: "bg-amber-950/60" };
     if (isHeadDown) return { text: "DISTRACTION: HEAD BOWED", color: "text-orange-500", border: "border-orange-500", bg: "bg-orange-950/60" };
-    return { text: "NOMINAL: CRUISE ACTIVE", color: "text-cyan-400", border: "border-cyan-500/40", bg: "bg-cyan-950/30" };
+    if (consecutiveLowEarFrames > 15) return { text: "WARNING: DROWSINESS", color: "text-amber-400", border: "border-amber-400", bg: "bg-amber-950/40" };
+    return { text: "NOMINAL: ATTENTIVE", color: "text-cyan-400", border: "border-cyan-500/40", bg: "bg-cyan-950/30" };
   };
 
   const status = getSystemStatus();
 
-  const radius = 48;
+  const radius = 56;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (alertnessScore / 100) * circumference;
 
@@ -261,10 +249,11 @@ export default function App() {
       onClick={initAudio} 
       className="min-h-screen w-full bg-[#05070D] text-slate-100 font-mono select-none relative overflow-x-hidden"
     >
+      {/* Hidden elements capturing current client device video */}
       <video ref={localVideoRef} autoPlay playsInline muted className="hidden" />
       <canvas ref={hiddenCanvasRef} className="hidden" />
 
-      {/* Cyber Grid */}
+      {/* Cyber Grid Background */}
       <div 
         className="fixed inset-0 pointer-events-none opacity-15"
         style={{
@@ -273,68 +262,50 @@ export default function App() {
         }}
       />
 
-      {/* ========================================================= */}
-      {/* SECTION 1: FRONT SCREEN COCKPIT (Zero Scroll)             */}
-      {/* ========================================================= */}
-      <div className="h-screen w-full p-3 flex flex-col justify-between box-border relative z-10">
+      {/* SECTION 1: FRONT SCREEN COCKPIT (Zero Scroll) */}
+      <div className="h-screen w-full p-4 flex flex-col justify-between box-border relative z-10">
         
-        {/* TOP INTERVENTION ALERT BANNER */}
+        {/* POPUP ALERT BANNER */}
         {isMicrosleep && (
-          <div className={`absolute top-2 left-6 right-6 z-50 py-2 px-5 rounded-2xl border-2 flex items-center justify-between animate-pulse shadow-2xl backdrop-blur-md ${
-            interventionStage === 'SAFE_STOP'
-              ? 'bg-red-700/95 border-red-300 shadow-[0_0_40px_rgba(255,0,0,0.9)]'
-              : (interventionStage === 'HAPTIC_JOLT'
-                  ? 'bg-amber-600/95 border-amber-300 shadow-[0_0_35px_rgba(245,158,11,0.8)]'
-                  : 'bg-red-600/90 border-red-300 shadow-[0_0_30px_rgba(255,0,0,0.7)]')
-          }`}>
+          <div className="absolute top-2 left-6 right-6 z-50 bg-red-600/95 text-white py-2 px-5 rounded-2xl border-2 border-red-300 flex items-center justify-between animate-pulse shadow-[0_0_35px_rgba(255,0,0,0.8)] backdrop-blur-md">
             <div className="flex items-center space-x-3">
-              <TriangleAlert className="w-6 h-6 text-yellow-300 animate-bounce flex-shrink-0" />
+              <AlertTriangle className="w-6 h-6 text-yellow-300 animate-bounce" />
               <div>
-                <span className="font-extrabold text-sm md:text-base tracking-wider block font-sans">
-                  {interventionStage === 'SAFE_STOP' && "🛑 LEVEL 3 SAFE STOP: CONTROLLED EMERGENCY BRAKING APPLIED"}
-                  {interventionStage === 'HAPTIC_JOLT' && "⚡ STAGE 1 INTERVENTION: 3X HAPTIC BRAKE JOLT CYCLING"}
-                  {interventionStage === 'PRE_WARN' && "⚠️ WARNING: DRIVER UNRESPONSIVE — INTERVENTION INCOMING"}
+                <span className="font-extrabold text-base tracking-wider block font-sans">
+                  EMERGENCY: DRIVER MICROSLEEP DETECTED!
                 </span>
-                <span className="text-[11px] text-white/90">
-                  Unresponsive Time: {unresponsiveTime.toFixed(1)}s • {canCommand}
+                <span className="text-[11px] text-red-100">
+                  Acoustic Alarm Active • Frame Duration: {(consecutiveLowEarFrames / 30).toFixed(1)}s (Limit {frameThreshold}f)
                 </span>
               </div>
             </div>
-            
-            <div className="flex items-center space-x-2">
-              {hazardActive && (
-                <span className="px-2.5 py-1 bg-amber-500 text-black font-extrabold text-xs rounded-lg animate-ping">
-                  HAZARDS ON
-                </span>
-              )}
-              <span className="text-xs font-bold bg-black/60 px-3 py-1 rounded-xl border border-white/40">
-                {unresponsiveTime >= 20.0 ? "HALT COMPLETE" : `${(20.0 - unresponsiveTime).toFixed(1)}s TO STOP`}
-              </span>
-            </div>
+            <span className="text-xs font-bold bg-black/60 px-3 py-1 rounded-xl border border-red-300">
+              {consecutiveLowEarFrames}/{frameThreshold} F
+            </span>
           </div>
         )}
 
         {/* HEADER BAR */}
-        <header className="flex items-center justify-between border border-cyan-900/40 bg-[#090D16]/90 backdrop-blur-md rounded-2xl px-4 py-1.5 shadow-[0_2px_20px_rgba(0,255,255,0.05)]">
+        <header className="flex items-center justify-between border border-cyan-900/40 bg-[#090D16]/90 backdrop-blur-md rounded-2xl px-4 py-2 shadow-[0_2px_20px_rgba(0,255,255,0.05)]">
           <div className="flex items-center space-x-3">
-            <div className="p-1.5 rounded-xl bg-cyan-950 border border-cyan-500/40 text-cyan-400">
+            <div className="p-2 rounded-xl bg-cyan-950 border border-cyan-500/40 text-cyan-400">
               <ShieldAlert className="w-5 h-5 animate-pulse" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h1 className="font-extrabold text-sm tracking-tight bg-gradient-to-r from-cyan-400 to-emerald-400 bg-clip-text text-transparent font-sans">
+                <h1 className="font-extrabold text-base tracking-tight bg-gradient-to-r from-cyan-400 to-emerald-400 bg-clip-text text-transparent font-sans">
                   DRIVEGUARD AI COCKPIT
                 </h1>
                 <span className="text-[9px] uppercase font-bold tracking-widest bg-cyan-950/80 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800">
-                  CAN-BUS ACTUATOR
+                  ADAS HUD
                 </span>
               </div>
             </div>
           </div>
 
-          <div className={`px-3 py-1 rounded-xl border ${status.border} ${status.bg} flex items-center space-x-2 shadow-inner`}>
+          <div className={`px-4 py-1.5 rounded-xl border ${status.border} ${status.bg} flex items-center space-x-2 shadow-inner`}>
             <span className="w-2.5 h-2.5 rounded-full bg-current animate-ping" />
-            <span className={`text-[11px] font-black tracking-wider uppercase font-sans ${status.color}`}>
+            <span className={`text-xs font-black tracking-wider uppercase font-sans ${status.color}`}>
               {status.text}
             </span>
           </div>
@@ -345,14 +316,14 @@ export default function App() {
               onMouseUp={() => stopAlarmSound()}
               onTouchStart={() => startAlarmSound()}
               onTouchEnd={() => stopAlarmSound()}
-              className="px-2.5 py-1 rounded-xl bg-red-950/70 hover:bg-red-900 text-red-300 border border-red-700/60 text-xs font-bold flex items-center space-x-1.5 transition active:scale-95"
-              title="Hold to test alarm"
+              className="px-3 py-1 rounded-xl bg-red-950/70 hover:bg-red-900 text-red-300 border border-red-700/60 text-xs font-bold flex items-center space-x-1.5 transition active:scale-95"
+              title="Hold to test siren"
             >
               <BellRing className="w-3.5 h-3.5 text-red-400" />
               <span>TEST SIREN</span>
             </button>
 
-            <div className="flex items-center space-x-1.5 bg-slate-900 px-2 py-1 rounded-xl border border-slate-800 text-xs">
+            <div className="flex items-center space-x-1.5 bg-slate-900 px-2.5 py-1 rounded-xl border border-slate-800 text-xs">
               <Radio className={`w-3 h-3 ${wsConnected ? 'text-emerald-400 animate-spin' : 'text-red-500'}`} />
               <span className={wsConnected ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
                 {wsConnected ? 'SYNCED' : 'CONNECTING'}
@@ -374,36 +345,36 @@ export default function App() {
           </div>
         </header>
 
-        {/* WORKSPACE CLUSTER */}
-        <div className="grid grid-cols-12 gap-3 flex-1 my-2 overflow-hidden items-stretch">
+        {/* MAIN HUD CLUSTER */}
+        <div className="grid grid-cols-12 gap-4 flex-1 my-3 overflow-hidden items-stretch">
           
-          {/* LEFT TELEMETRY TILES (5 COLUMNS) */}
-          <div className="col-span-5 flex flex-col justify-between space-y-2">
+          {/* LEFT TELEMETRY TILES (6 COLUMNS) */}
+          <div className="col-span-6 flex flex-col justify-between space-y-3">
             
-            {/* ROW 1: ALERTNESS SPEEDOMETER + YAWN COUNTER */}
-            <div className="grid grid-cols-2 gap-2 flex-1">
+            {/* ROW 1: ALERTNESS SPEEDOMETER + YAWN PIP TILE */}
+            <div className="grid grid-cols-2 gap-3 flex-1">
               
               {/* SPEEDOMETER */}
-              <div className="p-2.5 rounded-xl border border-cyan-900/40 bg-[#0B0F19]/90 backdrop-blur-md flex flex-col items-center justify-between shadow-xl">
-                <span className="text-slate-400 font-sans uppercase font-bold text-[10px] flex items-center gap-1">
-                  <Zap className="w-3 h-3 text-cyan-400" /> Alertness Index
+              <div className="p-3 rounded-2xl border border-cyan-900/40 bg-[#0B0F19]/90 backdrop-blur-md flex flex-col items-center justify-between shadow-xl">
+                <span className="text-slate-400 font-sans uppercase font-bold text-[11px] flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5 text-cyan-400" /> Alertness Index
                 </span>
-                <div className="relative flex items-center justify-center my-0.5">
-                  <svg className="w-24 h-24 transform -rotate-90">
+                <div className="relative flex items-center justify-center my-1">
+                  <svg className="w-28 h-28 transform -rotate-90">
                     <circle
-                      cx="48"
-                      cy="48"
+                      cx="56"
+                      cy="56"
                       r={radius}
                       stroke="rgba(30, 41, 59, 0.6)"
-                      strokeWidth="7"
+                      strokeWidth="8"
                       fill="transparent"
                     />
                     <circle
-                      cx="48"
-                      cy="48"
+                      cx="56"
+                      cy="56"
                       r={radius}
                       stroke={alertnessScore > 70 ? "#00F0FF" : (alertnessScore > 40 ? "#FFB800" : "#FF0055")}
-                      strokeWidth="7"
+                      strokeWidth="8"
                       strokeDasharray={circumference}
                       strokeDashoffset={strokeDashoffset}
                       strokeLinecap="round"
@@ -412,118 +383,119 @@ export default function App() {
                     />
                   </svg>
                   <div className="absolute flex flex-col items-center">
-                    <span className={`text-xl font-black font-sans ${alertnessScore > 70 ? "text-cyan-400" : (alertnessScore > 40 ? "text-amber-400" : "text-red-500")}`}>
+                    <span className={`text-2xl font-black font-sans ${alertnessScore > 70 ? "text-cyan-400" : (alertnessScore > 40 ? "text-amber-400" : "text-red-500")}`}>
                       {alertnessScore}%
                     </span>
-                    <span className="text-[8px] text-slate-400 uppercase tracking-widest font-bold">
-                      {alertnessScore > 70 ? "OPTIMAL" : "DROWSY"}
+                    <span className="text-[9px] text-slate-400 uppercase tracking-widest font-bold">
+                      {alertnessScore > 70 ? "ATTENTIVE" : (alertnessScore > 40 ? "DROWSY" : "CRITICAL")}
                     </span>
                   </div>
                 </div>
-                <span className="text-[9px] text-cyan-400/80 font-mono">EDGE LOGGING NOMINAL</span>
+                <span className="text-[10px] text-cyan-400/80 font-mono">EDGE LOGGING NOMINAL</span>
               </div>
 
-              {/* YAWN PIP GAUGE */}
-              <div className={`p-2.5 rounded-xl border flex flex-col justify-between transition-all shadow-xl ${
+              {/* YAWN COUNTER */}
+              <div className={`p-3 rounded-2xl border flex flex-col justify-between transition-all shadow-xl ${
                 yawnCount >= 3 ? 'bg-red-950/40 border-red-500/70 shadow-[0_0_20px_rgba(255,0,0,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
               }`}>
-                <div className="flex items-center justify-between text-[10px]">
-                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1">
-                    <Flame className="w-3 h-3 text-amber-400" /> Yawns (2m)
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1 text-[11px]">
+                    <Flame className="w-3.5 h-3.5 text-amber-400" /> Yawns (2m Window)
                   </span>
-                  <span className="text-[9px] text-amber-400 bg-amber-950/80 px-1 rounded border border-amber-900 font-mono">
+                  <span className="text-[9px] text-amber-400 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-900 font-mono">
                     FR-5
                   </span>
                 </div>
 
-                <div className="flex items-baseline justify-between my-0.5">
-                  <span className={`text-2xl font-black font-sans ${yawnCount >= 3 ? 'text-red-400 animate-pulse' : 'text-amber-400'}`}>
-                    {yawnCount} <span className="text-xs text-slate-500 font-normal">/ 3</span>
+                <div className="flex items-baseline justify-between my-1">
+                  <span className={`text-3xl font-black font-sans ${yawnCount >= 3 ? 'text-red-400 animate-pulse' : 'text-amber-400'}`}>
+                    {yawnCount} <span className="text-sm text-slate-500 font-normal">/ 3</span>
                   </span>
-                  <span className="text-[9px] text-slate-400">Limit: 3/120s</span>
+                  <span className="text-[10px] text-slate-400">Limit: 3/120s</span>
                 </div>
 
-                <div className="grid grid-cols-3 gap-1.5">
+                <div className="grid grid-cols-3 gap-2">
                   {[1, 2, 3].map((num) => (
                     <div
                       key={num}
-                      className={`h-7 rounded-lg flex items-center justify-center font-sans font-bold text-xs border transition-all ${
+                      className={`h-9 rounded-xl flex flex-col items-center justify-center font-sans font-bold text-xs border transition-all ${
                         num <= yawnCount 
-                          ? 'bg-amber-500/20 text-amber-300 border-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.5)]' 
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-400 shadow-[0_0_10px_rgba(245,158,11,0.5)]' 
                           : 'bg-slate-950 text-slate-600 border-slate-800'
                       }`}
                     >
-                      #{num}
+                      <span className="text-[8px] text-slate-400">YAWN</span>
+                      <span>#{num}</span>
                     </div>
                   ))}
                 </div>
 
-                <span className="text-[9px] text-slate-500 font-mono flex justify-between">
+                <span className="text-[10px] text-slate-500 font-mono flex justify-between">
                   <span>Auto-Reset Timer</span>
-                  <span>120s</span>
+                  <span>120s Window</span>
                 </span>
               </div>
 
             </div>
 
             {/* ROW 2: EAR & MAR */}
-            <div className="grid grid-cols-2 gap-2 flex-1">
+            <div className="grid grid-cols-2 gap-3 flex-1">
               
-              {/* EAR */}
-              <div className={`p-2.5 rounded-xl border flex flex-col justify-between shadow-xl ${
-                ear < earThreshold ? 'bg-red-950/40 border-red-500 shadow-[0_0_15px_rgba(255,0,85,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
+              {/* EAR CARD */}
+              <div className={`p-3 rounded-2xl border flex flex-col justify-between shadow-xl ${
+                ear < earThreshold ? 'bg-red-950/40 border-red-500 shadow-[0_0_20px_rgba(255,0,85,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
               }`}>
-                <div className="flex items-center justify-between text-[10px]">
-                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1">
-                    <Eye className="w-3 h-3 text-cyan-400" /> EAR Metric
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1.5 text-[11px]">
+                    <Eye className="w-3.5 h-3.5 text-cyan-400" /> EAR Metric
                   </span>
-                  <span className="text-[9px] bg-slate-900 text-slate-400 px-1 rounded">
+                  <span className="text-[10px] bg-slate-900 text-slate-400 px-1.5 py-0.5 rounded border border-slate-800">
                     &lt; {earThreshold}
                   </span>
                 </div>
-                <div className="flex items-baseline justify-between">
-                  <span className={`text-2xl font-black font-sans ${ear < earThreshold ? 'text-red-400' : 'text-cyan-400'}`}>
+                <div className="flex items-baseline justify-between my-1">
+                  <span className={`text-3xl font-black font-sans ${ear < earThreshold ? 'text-red-400' : 'text-cyan-400'}`}>
                     {ear.toFixed(3)}
                   </span>
-                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                     ear < earThreshold ? 'bg-red-900 text-red-200 animate-pulse' : 'bg-cyan-950 text-cyan-300 border border-cyan-800'
                   }`}>
                     {ear < earThreshold ? 'CLOSED' : 'OPEN'}
                   </span>
                 </div>
-                <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
                   <div 
-                    className={`h-full transition-all duration-200 ${ear < earThreshold ? 'bg-red-500' : 'bg-cyan-400'}`}
+                    className={`h-full transition-all duration-200 ${ear < earThreshold ? 'bg-red-500 shadow-[0_0_10px_#f00]' : 'bg-cyan-400'}`}
                     style={{ width: `${Math.min(100, (ear / 0.4) * 100)}%` }}
                   />
                 </div>
               </div>
 
-              {/* MAR */}
-              <div className={`p-2.5 rounded-xl border flex flex-col justify-between shadow-xl ${
-                mar > marThreshold ? 'bg-amber-950/40 border-amber-500 shadow-[0_0_15px_rgba(245,158,11,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
+              {/* MAR CARD */}
+              <div className={`p-3 rounded-2xl border flex flex-col justify-between shadow-xl ${
+                mar > marThreshold ? 'bg-amber-950/40 border-amber-500 shadow-[0_0_20px_rgba(245,158,11,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
               }`}>
-                <div className="flex items-center justify-between text-[10px]">
-                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1">
-                    <Activity className="w-3 h-3 text-amber-400" /> MAR Metric
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1.5 text-[11px]">
+                    <Activity className="w-3.5 h-3.5 text-amber-400" /> MAR Metric
                   </span>
-                  <span className="text-[9px] bg-slate-900 text-slate-400 px-1 rounded">
+                  <span className="text-[10px] bg-slate-900 text-slate-400 px-1.5 py-0.5 rounded border border-slate-800">
                     &gt; {marThreshold}
                   </span>
                 </div>
-                <div className="flex items-baseline justify-between">
-                  <span className={`text-2xl font-black font-sans ${mar > marThreshold ? 'text-amber-400' : 'text-slate-200'}`}>
+                <div className="flex items-baseline justify-between my-1">
+                  <span className={`text-3xl font-black font-sans ${mar > marThreshold ? 'text-amber-400' : 'text-slate-200'}`}>
                     {mar.toFixed(3)}
                   </span>
-                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded ${
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                     mar > marThreshold ? 'bg-amber-950 text-amber-300 border border-amber-800 animate-pulse' : 'bg-slate-900 text-slate-400'
                   }`}>
-                    {mar > marThreshold ? 'YAWN' : 'NORM'}
+                    {mar > marThreshold ? 'YAWN' : 'NORMAL'}
                   </span>
                 </div>
-                <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-800">
+                <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800">
                   <div 
-                    className={`h-full transition-all duration-200 ${mar > marThreshold ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                    className={`h-full transition-all duration-200 ${mar > marThreshold ? 'bg-amber-400 shadow-[0_0_10px_#fa0]' : 'bg-emerald-500'}`}
                     style={{ width: `${Math.min(100, (mar / 0.8) * 100)}%` }}
                   />
                 </div>
@@ -532,24 +504,24 @@ export default function App() {
             </div>
 
             {/* ROW 3: CONSECUTIVE CLOSED FRAMES */}
-            <div className="p-2.5 rounded-xl border border-cyan-900/40 bg-[#0B0F19]/90 backdrop-blur-md shadow-xl">
-              <div className="flex items-center justify-between text-[10px] mb-1">
-                <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1">
-                  <Terminal className="w-3 h-3 text-purple-400" /> Eye Closure Duration (FR-4)
+            <div className="p-3 rounded-2xl border border-cyan-900/40 bg-[#0B0F19]/90 backdrop-blur-md shadow-xl">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-slate-400 font-sans uppercase font-bold flex items-center gap-1.5 text-[11px]">
+                  <Terminal className="w-3.5 h-3.5 text-purple-400" /> Eyelid Closure Progress (FR-4)
                 </span>
-                <span className="text-[9px] text-purple-400 font-bold bg-purple-950/60 px-1 rounded">
-                  45 FRAMES = 1.5s
+                <span className="text-[10px] text-purple-400 font-bold bg-purple-950/60 px-2 py-0.5 rounded border border-purple-900">
+                  {frameThreshold} FRAMES = 1.5s
                 </span>
               </div>
-              <div className="flex items-baseline justify-between my-0.5">
-                <span className={`text-xl font-black font-sans ${consecutiveLowEarFrames >= frameThreshold ? 'text-red-500 animate-bounce' : 'text-purple-300'}`}>
+              <div className="flex items-baseline justify-between my-1">
+                <span className={`text-2xl font-black font-sans ${consecutiveLowEarFrames >= frameThreshold ? 'text-red-500 animate-bounce' : 'text-purple-300'}`}>
                   {consecutiveLowEarFrames} <span className="text-xs text-slate-500 font-normal">/ {frameThreshold} f</span>
                 </span>
-                <span className="text-[10px] text-slate-400">
-                  {((consecutiveLowEarFrames / 30)).toFixed(1)}s elapsed
+                <span className="text-[11px] text-slate-400">
+                  {((consecutiveLowEarFrames / 30)).toFixed(1)}s Elapsed
                 </span>
               </div>
-              <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800 flex">
+              <div className="w-full bg-slate-950 h-2.5 rounded-full overflow-hidden border border-slate-800 flex">
                 <div 
                   className={`h-full rounded-full transition-all duration-100 ${
                     consecutiveLowEarFrames >= frameThreshold ? 'bg-red-600 animate-pulse' : (consecutiveLowEarFrames > 20 ? 'bg-amber-400' : 'bg-purple-500')
@@ -561,161 +533,102 @@ export default function App() {
 
           </div>
 
-          {/* RIGHT COLUMN: AUTONOMOUS BRAKE ACTUATOR + TELEMETRY CHART (7 COLUMNS) */}
-          <div className="col-span-7 flex flex-col justify-between space-y-2">
-            
-            {/* AUTONOMOUS BRAKE ACTUATOR (CAN-BUS CONTROL TILE) */}
-            <div className={`p-3 rounded-2xl border backdrop-blur-md transition-all shadow-2xl flex flex-col justify-between ${
-              interventionStage === 'SAFE_STOP' 
-                ? 'bg-red-950/70 border-red-500 shadow-[0_0_30px_rgba(255,0,0,0.6)]' 
-                : (interventionStage === 'HAPTIC_JOLT' 
-                    ? 'bg-amber-950/60 border-amber-400 shadow-[0_0_25px_rgba(245,158,11,0.5)]' 
-                    : 'bg-[#0B0F19]/90 border-cyan-900/50')
-            }`}>
-              
-              <div className="flex items-center justify-between text-xs border-b border-slate-800/80 pb-1.5">
+          {/* RIGHT LIVE CHART (6 COLUMNS) */}
+          <div className="col-span-6 bg-[#0B0F19]/90 border border-cyan-900/50 rounded-2xl p-4 shadow-xl backdrop-blur-md flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center space-x-2">
-                  <Disc className={`w-4 h-4 ${brakePressure > 0 ? 'text-red-400 animate-spin' : 'text-cyan-400'}`} />
-                  <span className="font-bold text-slate-200 uppercase tracking-wide font-sans text-[11px]">
-                    ECU Autonomous Brake Actuator (CAN-Bus)
+                  <TrendingUp className="w-4 h-4 text-cyan-400" />
+                  <span className="text-xs uppercase font-extrabold tracking-wider text-slate-200 font-sans">
+                    Real-Time Fatigue Telemetry (EAR vs MAR)
                   </span>
                 </div>
-                <span className="text-[10px] text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800 font-mono">
-                  {canCommand}
-                </span>
-              </div>
 
-              {/* DUAL READOUTS: VEHICLE SPEED + HYDRAULIC PRESSURE */}
-              <div className="grid grid-cols-2 gap-3 my-2">
-                
-                {/* VEHICLE SPEED READOUT */}
-                <div className="bg-black/50 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
-                  <div>
-                    <span className="text-[9px] text-slate-400 block uppercase font-sans">Vehicle Speed</span>
-                    <span className={`text-2xl font-black font-sans ${vehicleSpeed === 0 ? 'text-red-500 animate-pulse' : (vehicleSpeed < 60 ? 'text-amber-400' : 'text-cyan-400')}`}>
-                      {vehicleSpeed} <span className="text-xs text-slate-500 font-normal">KM/H</span>
-                    </span>
+                <div className="flex items-center space-x-3 text-[11px]">
+                  <div className="flex items-center space-x-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 inline-block shadow-[0_0_8px_#00F0FF]" />
+                    <span className="text-cyan-300 font-bold">EAR</span>
                   </div>
-                  <Gauge className={`w-6 h-6 ${vehicleSpeed === 0 ? 'text-red-500' : 'text-slate-600'}`} />
-                </div>
-
-                {/* HYDRAULIC BRAKE PRESSURE READOUT */}
-                <div className="bg-black/50 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
-                  <div>
-                    <span className="text-[9px] text-slate-400 block uppercase font-sans">Hydraulic Pressure</span>
-                    <span className={`text-2xl font-black font-sans ${brakePressure > 50 ? 'text-red-400 animate-pulse' : 'text-slate-200'}`}>
-                      {brakePressure}% <span className="text-xs text-slate-500 font-normal">APPLIED</span>
-                    </span>
+                  <div className="flex items-center space-x-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block shadow-[0_0_8px_#FFB800]" />
+                    <span className="text-amber-300 font-bold">MAR</span>
                   </div>
-                  <AlertOctagon className={`w-6 h-6 ${brakePressure > 0 ? 'text-red-400' : 'text-slate-600'}`} />
                 </div>
-
               </div>
+              <p className="text-[11px] text-slate-500 font-sans">
+                Continuous eye aspect ratio vs mouth aspect ratio telemetry streams logged at ~25Hz.
+              </p>
+            </div>
 
-              {/* BRAKE PRESSURE ACTUATION BAR */}
-              <div>
-                <div className="flex justify-between text-[9px] text-slate-400 mb-1">
-                  <span>Pedal Actuator Force</span>
-                  <span>{brakePressure >= 100 ? "FULL LOCKUP (ABS ACTIVE)" : (brakePressure > 0 ? "PULSE ENGAGED" : "CRUISE DISENGAGED")}</span>
-                </div>
-                <div className="w-full bg-slate-950 h-2.5 rounded-full overflow-hidden border border-slate-800 p-0.5">
-                  <div 
-                    className={`h-full rounded-full transition-all duration-150 ${
-                      brakePressure > 60 
-                        ? 'bg-red-500 shadow-[0_0_15px_#f00]' 
-                        : (brakePressure > 0 ? 'bg-amber-400 shadow-[0_0_10px_#fa0]' : 'bg-cyan-500')
-                    }`}
-                    style={{ width: `${brakePressure}%` }}
+            <div className="h-[280px] w-full my-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={telemetryHistory} margin={{ top: 8, right: 12, left: -25, bottom: 0 }}>
+                  <XAxis dataKey="time" stroke="#334155" fontSize={9} tickLine={false} />
+                  <YAxis domain={[0, 0.65]} stroke="#334155" fontSize={9} tickLine={false} />
+                  
+                  <Tooltip 
+                    contentStyle={{ 
+                      backgroundColor: 'rgba(11, 15, 25, 0.95)', 
+                      borderColor: '#00F0FF33', 
+                      borderRadius: '10px', 
+                      fontSize: '11px',
+                      boxShadow: '0 0 15px rgba(0,0,0,0.8)' 
+                    }}
+                    labelStyle={{ color: '#94A3B8' }}
                   />
-                </div>
-              </div>
 
+                  <ReferenceLine 
+                    y={earThreshold} 
+                    stroke="#FF0055" 
+                    strokeDasharray="3 3" 
+                    label={{ value: 'EAR Limit', fill: '#FF0055', fontSize: 9, position: 'right' }} 
+                  />
+
+                  <ReferenceLine 
+                    y={marThreshold} 
+                    stroke="#FFB800" 
+                    strokeDasharray="3 3" 
+                    label={{ value: 'Yawn Limit', fill: '#FFB800', fontSize: 9, position: 'right' }} 
+                  />
+
+                  <Line type="monotone" dataKey="EAR" stroke="#00F0FF" strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="MAR" stroke="#FFB800" strokeWidth={2} dot={false} isAnimationActive={false} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
 
-            {/* REAL-TIME DUAL-STREAM TELEMETRY GRAPH (EAR vs MAR) */}
-            <div className="bg-[#0B0F19]/90 border border-cyan-900/50 rounded-2xl p-3 shadow-xl backdrop-blur-md flex flex-col justify-between flex-1">
-              <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center space-x-2">
-                  <TrendingUp className="w-3.5 h-3.5 text-cyan-400" />
-                  <span className="text-[10px] uppercase font-bold tracking-wider text-slate-200 font-sans">
-                    Fatigue Telemetry Stream (EAR vs MAR)
-                  </span>
-                </div>
-
-                <div className="flex items-center space-x-2 text-[9px]">
-                  <div className="flex items-center space-x-1">
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block shadow-[0_0_6px_#00F0FF]" />
-                    <span className="text-cyan-300">EAR</span>
-                  </div>
-                  <div className="flex items-center space-x-1">
-                    <span className="w-2 h-2 rounded-full bg-amber-400 inline-block shadow-[0_0_6px_#FFB800]" />
-                    <span className="text-amber-300">MAR</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="h-[125px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={telemetryHistory} margin={{ top: 4, right: 10, left: -28, bottom: -5 }}>
-                    <XAxis dataKey="time" stroke="#334155" fontSize={8} tickLine={false} />
-                    <YAxis domain={[0, 0.65]} stroke="#334155" fontSize={8} tickLine={false} />
-                    
-                    <Tooltip 
-                      contentStyle={{ 
-                        backgroundColor: 'rgba(11, 15, 25, 0.95)', 
-                        borderColor: '#00F0FF33', 
-                        borderRadius: '8px', 
-                        fontSize: '10px',
-                        padding: '4px 8px'
-                      }}
-                      labelStyle={{ color: '#94A3B8' }}
-                    />
-
-                    <ReferenceLine y={earThreshold} stroke="#FF0055" strokeDasharray="3 3" />
-                    <ReferenceLine y={marThreshold} stroke="#FFB800" strokeDasharray="3 3" />
-
-                    <Line type="monotone" dataKey="EAR" stroke="#00F0FF" strokeWidth={1.8} dot={false} isAnimationActive={false} />
-                    <Line type="monotone" dataKey="MAR" stroke="#FFB800" strokeWidth={1.8} dot={false} isAnimationActive={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="pt-1 border-t border-slate-800/80 flex items-center justify-between text-[9px] text-slate-500 font-mono">
-                <span>BUFFER: 24 SAMPLES</span>
-                <span className="text-cyan-400">FR-6 TELEMETRY LOG ACTIVE</span>
-              </div>
+            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+              <span>STREAM BUFFER: 30 SAMPLES</span>
+              <span className="text-cyan-400 font-bold">CLIENT CAMERA TELEMETRY ACTIVE</span>
             </div>
-
           </div>
 
         </div>
 
-        {/* BOTTOM NOTCH SCROLL-DOWN BUTTON */}
-        <div className="border-t border-cyan-900/40 pt-1 flex items-center justify-between text-[10px] text-slate-500">
-          <span>VIGIL-AI EDGE CLUSTER</span>
+        {/* BOTTOM NOTCH SCROLL-DOWN INDICATOR */}
+        <div className="border-t border-cyan-900/40 pt-2 flex items-center justify-between text-[11px] text-slate-500">
+          <span>VIGIL-AI AUTOMOTIVE TELEMETRY CLUSTER</span>
           
           <button 
             onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}
-            className="flex items-center space-x-1.5 text-cyan-400 hover:text-cyan-300 font-bold bg-cyan-950/60 px-3 py-0.5 rounded-full border border-cyan-800 transition"
+            className="flex items-center space-x-1.5 text-cyan-400 hover:text-cyan-300 font-bold bg-cyan-950/60 px-3 py-1 rounded-full border border-cyan-800 transition"
           >
-            <span>SCROLL DOWN FOR DIAGNOSTIC CAMERA STREAM</span>
-            <ChevronDown className="w-3.5 h-3.5 animate-bounce" />
+            <span>SCROLL DOWN FOR PROCESSED CAMERA TELECAST</span>
+            <ChevronDown className="w-4 h-4 animate-bounce" />
           </button>
 
-          <span className="text-cyan-400 font-bold">FAIL-SAFE ADAS ACTIVE</span>
+          <span className="text-cyan-400 font-bold">FR-4 • FR-5 • FR-6</span>
         </div>
 
       </div>
 
-      {/* ========================================================= */}
-      {/* SECTION 2: LIVE CAMERA TELECAST (Scrolled View)           */}
-      {/* ========================================================= */}
+      {/* SECTION 2: LIVE CAMERA TELECAST (Scrolled view) */}
       <div className="min-h-screen w-full p-6 flex flex-col justify-center items-center relative z-10 border-t-2 border-cyan-900/40 bg-[#070A12]/95 backdrop-blur-lg">
         <div className="w-full max-w-4xl bg-[#0B0F19]/90 border border-cyan-900/60 rounded-3xl p-6 shadow-2xl flex flex-col justify-between">
           
           <div className="w-full flex items-center justify-between mb-4">
             <div className="flex items-center space-x-2">
-              <span className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+              <Camera className="w-4 h-4 text-cyan-400" />
               <h2 className="text-sm uppercase font-extrabold tracking-wider text-slate-200 font-sans">
                 Driver Diagnostic Camera Telecast (Local Device Stream)
               </h2>
@@ -766,11 +679,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
-
-
-// ngrok http 8000
