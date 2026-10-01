@@ -23,7 +23,7 @@ export default function App() {
   const [unresponsiveTime, setUnresponsiveTime] = useState(0.0);
   const [brakePressure, setBrakePressure] = useState(0);
   const [vehicleSpeed, setVehicleSpeed] = useState(80);
-  const [canCommand, setCanCommand] = useState("0x018 [SYS_STANDBY]");
+  const [canCommand, setCanCommand] = useState("0x018 [SYS_STANDBY_NOMINAL]");
   const [interventionStage, setInterventionStage] = useState("CRUISE");
   const [hazardActive, setHazardActive] = useState(false);
 
@@ -39,7 +39,6 @@ export default function App() {
 
   const localVideoRef = useRef(null);
   const captureCanvasRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
   const socketRef = useRef(null);
 
   const initAudio = () => {
@@ -144,43 +143,7 @@ export default function App() {
     };
   }, []);
 
-  // Draw landmark points smoothly over the live hardware video
-  const drawLandmarks = (eyePts, mouthPts, isMicrosleepAlert) => {
-    const canvas = overlayCanvasRef.current;
-    const video = localVideoRef.current;
-    if (!canvas || !video) return;
-
-    const ctx = canvas.getContext('2d');
-    canvas.width = video.clientWidth;
-    canvas.height = video.clientHeight;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (isMicrosleepAlert) {
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 6;
-      ctx.strokeRect(0, 0, canvas.width, canvas.height);
-    }
-
-    if (eyePts && eyePts.length > 0) {
-      ctx.fillStyle = '#10b981';
-      for (const [x, y] of eyePts) {
-        ctx.beginPath();
-        ctx.arc(x * canvas.width, y * canvas.height, 3, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-    }
-
-    if (mouthPts && mouthPts.length > 0) {
-      ctx.fillStyle = '#f59e0b';
-      for (const [x, y] of mouthPts) {
-        ctx.beginPath();
-        ctx.arc(x * canvas.width, y * canvas.height, 3.5, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-    }
-  };
-
-  // High-performance streaming loop (transmits lightweight 480x360 frames)
+  // High-performance streaming loop to python backend
   useEffect(() => {
     let socket;
     let isWaitingForResponse = false;
@@ -243,8 +206,6 @@ export default function App() {
           if (data.can_command !== undefined) setCanCommand(data.can_command);
           if (data.intervention_stage !== undefined) setInterventionStage(data.intervention_stage);
           if (data.hazard_active !== undefined) setHazardActive(data.hazard_active);
-
-          drawLandmarks(data.eye_pts, data.mouth_pts, data.microsleep);
 
           const timeLabel = new Date().toLocaleTimeString().split(' ')[0];
           setTelemetryHistory(prev => [
@@ -342,7 +303,7 @@ export default function App() {
       {isHeadDown && !isMicrosleep && (
         <div className="bg-orange-600/90 text-white py-2 px-4 rounded-xl border border-orange-400 flex items-center justify-between mb-4 shadow-[0_0_20px_rgba(234,88,12,0.4)]">
           <span className="font-bold text-sm tracking-wide">
-            ⚠️ ATTENTION: HEAD BOWED DOWN / ROAD VIEW OCCLUDED
+            ⚠️️ ATTENTION: HEAD BOWED DOWN / ROAD VIEW OCCLUDED
           </span>
           <span className="text-xs font-semibold bg-black/40 px-2.5 py-1 rounded">
             DISTRACTION WARNING
@@ -629,34 +590,32 @@ export default function App() {
 
         </div>
 
-        {/* RIGHT COLUMN: CAMERA FEED + LIVE TELEMETRY GRAPH (RIGHT 6 COLUMNS) */}
+        {/* RIGHT COLUMN: DIRECT HARDWARE WEBCAM + TELEMETRY GRAPH */}
         <div className="lg:col-span-6 flex flex-col space-y-4">
           
-          {/* CAMERA FEED - DIRECT LOCAL HARDWARE STREAM WITH OVERLAY */}
+          {/* CAMERA FEED - CLEAN HD DIRECT STREAM WITH NO DOTS */}
           <div className="bg-[#0D131F] border border-cyan-900/40 rounded-xl p-4 shadow-xl flex flex-col items-center justify-center">
             <div className="w-full flex items-center justify-between mb-3 px-1">
               <div className="flex items-center space-x-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span className="text-xs uppercase font-bold tracking-wider text-slate-300">
-                  Driver Diagnostic Camera Feed (Hardware HD)
+                  Driver Diagnostic Camera Feed
                 </span>
               </div>
               <span className="text-[10px] font-mono bg-cyan-950 text-cyan-400 px-2 py-0.5 rounded border border-cyan-900">
-                ZERO-LATENCY HUD
+                LIVE HARDWARE FEED
               </span>
             </div>
 
-            <div className="w-full aspect-video bg-black rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center relative">
+            <div className={`w-full aspect-video bg-black rounded-lg overflow-hidden border transition-all flex items-center justify-center relative ${
+              isMicrosleep ? 'border-red-500 shadow-[0_0_20px_rgba(255,0,0,0.6)]' : 'border-slate-800'
+            }`}>
               <video 
                 ref={localVideoRef} 
                 autoPlay 
                 playsInline 
                 muted 
                 className="w-full h-full object-cover" 
-              />
-              <canvas 
-                ref={overlayCanvasRef} 
-                className="absolute inset-0 pointer-events-none w-full h-full"
               />
             </div>
           </div>

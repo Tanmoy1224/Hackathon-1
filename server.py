@@ -11,7 +11,7 @@ import torch.nn as nn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="VIGIL-AI Ultra-Low Latency Telemetry Bridge")
+app = FastAPI(title="VIGIL-AI Clean Telemetry Bridge")
 
 app.add_middleware(
     CORSMiddleware,
@@ -92,7 +92,7 @@ def calculate_head_pitch(landmarks, w, h):
 @app.websocket("/ws/telemetry")
 async def telemetry_feed(websocket: WebSocket):
     await websocket.accept()
-    print("[*] Client connected to /ws/telemetry (Native Overlay Engine)")
+    print("[*] Client connected to /ws/telemetry (Clean Stream)")
 
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
@@ -160,8 +160,6 @@ async def telemetry_feed(websocket: WebSocket):
             mar = 0.15
             is_microsleep = False
             is_head_bowed = False
-            eye_pts = []
-            mouth_pts = []
 
             if results.multi_face_landmarks:
                 mesh = results.multi_face_landmarks[0].landmark
@@ -172,10 +170,6 @@ async def telemetry_feed(websocket: WebSocket):
                 mar, v_dist, h_dist = calculate_mar(MOUTH, mesh, w, h)
 
                 _, is_head_bowed = calculate_head_pitch(mesh, w, h)
-
-                # Send normalized coordinates (0.0 to 1.0) so browser paints dots with 0 latency
-                eye_pts = [[round(mesh[idx].x, 3), round(mesh[idx].y, 3)] for idx in (LEFT_EYE + RIGHT_EYE)]
-                mouth_pts = [[round(mesh[idx].x, 3), round(mesh[idx].y, 3)] for idx in MOUTH]
 
                 if not is_calibrated:
                     calibration_buffer.append(ear_avg)
@@ -298,10 +292,7 @@ async def telemetry_feed(websocket: WebSocket):
                 "vehicle_speed": int(vehicle_speed),
                 "can_command": str(can_command),
                 "intervention_stage": str(intervention_stage),
-                "hazard_active": bool(hazard_active),
-                "eye_pts": eye_pts,
-                "mouth_pts": mouth_pts,
-                "calibrated": is_calibrated
+                "hazard_active": bool(hazard_active)
             }
 
             await websocket.send_json(telemetry_payload)
