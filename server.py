@@ -11,7 +11,7 @@ import torch.nn as nn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="VIGIL-AI Minimal Testing Bridge")
+app = FastAPI(title="VIGIL-AI Client-Camera Telemetry Bridge")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,22 +81,18 @@ def calculate_head_pitch(landmarks, w, h):
     nose_y = landmarks[NOSE_TIP].y * h
     chin_y = landmarks[CHIN].y * h
 
-    nose_z = landmarks[NOSE_TIP].z * w
-    chin_z = landmarks[CHIN].z * w
-
     face_height = chin_y - forehead_y
     if face_height <= 0:
         return 0.4, False
 
     vertical_ratio = (chin_y - nose_y) / face_height
-    # Looking down flattens vertical nose-to-chin distance or pushes nose Z forward
     is_bowed = (vertical_ratio < 0.23) or ((chin_y - nose_y) < (0.16 * face_height))
     return vertical_ratio, is_bowed
 
 @app.websocket("/ws/telemetry")
 async def telemetry_feed(websocket: WebSocket):
     await websocket.accept()
-    print("[*] React Frontend connected to /ws/telemetry")
+    print("[*] Client connected to /ws/telemetry (Client-side camera mode)")
 
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
@@ -105,12 +101,6 @@ async def telemetry_feed(websocket: WebSocket):
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[!] Error: Could not open camera.")
-        await websocket.close()
-        return
 
     BUFFER_SIZE = 30
     frame_buffer = deque(maxlen=BUFFER_SIZE)
@@ -137,9 +127,22 @@ async def telemetry_feed(websocket: WebSocket):
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                await asyncio.sleep(0.01)
+            # Receive frame data directly from the client's browser webcam
+            client_data = await websocket.receive_json()
+            image_data = client_data.get("image")
+
+            if not image_data:
+                continue
+
+            # Strip base64 prefix and decode image into OpenCV format
+            if "," in image_data:
+                image_data = image_data.split(",")[1]
+
+            img_bytes = base64.b64decode(image_data)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if frame is None:
                 continue
 
             current_time = time.time()
@@ -157,7 +160,6 @@ async def telemetry_feed(websocket: WebSocket):
                     yawn_alarm_active = False
                     yawn_alarm_start_time = None
                     yawn_timestamps.clear()
-                    print("[INFO] Yawn alarm completed. Counter reset to 0/3.")
 
             ear_avg = 0.28
             mar = 0.15
@@ -172,7 +174,6 @@ async def telemetry_feed(websocket: WebSocket):
                 ear_avg = (ear_l + ear_r) / 2.0
                 mar, v_dist, h_dist = calculate_mar(MOUTH, mesh, w, h)
 
-                # Check head pitch (prevents false eye closure when head bows)
                 _, is_head_bowed = calculate_head_pitch(mesh, w, h)
 
                 for idx in LEFT_EYE + RIGHT_EYE:
@@ -180,7 +181,6 @@ async def telemetry_feed(websocket: WebSocket):
                 for idx in MOUTH:
                     cv2.circle(frame, (int(mesh[idx].x * w), int(mesh[idx].y * h)), 1, (0, 180, 255), -1)
 
-                # Dynamic glasses calibration (first 60 frames)
                 if not is_calibrated:
                     calibration_buffer.append(ear_avg)
                     cv2.putText(frame, f"CALIBRATING... {len(calibration_buffer)}/{CALIBRATION_LIMIT}", 
@@ -194,7 +194,6 @@ async def telemetry_feed(websocket: WebSocket):
                     frame_buffer.append([ear_l, ear_r, ear_avg, mar])
 
                     if is_head_bowed:
-                        # Driver's head is tilted down: reset eye closure counters
                         consecutive_closed_frames = 0
                         eye_closed_start_time = None
                         alertness_score = max(50, alertness_score - 1)
@@ -217,7 +216,6 @@ async def telemetry_feed(websocket: WebSocket):
                         eye_closed_start_time = None
                         alertness_score = min(100, alertness_score + 1)
 
-                    # Model Inference & Yawn Classification
                     if not is_microsleep and len(frame_buffer) == BUFFER_SIZE:
                         input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
                         with torch.no_grad():
@@ -230,12 +228,10 @@ async def telemetry_feed(websocket: WebSocket):
                             if yawn_consecutive_frames >= MIN_YAWN_FRAMES and not currently_yawning:
                                 yawn_timestamps.append(current_time)
                                 currently_yawning = True
-                                print(f"[EVENT] Yawn recorded: {len(yawn_timestamps)}/3")
                         else:
                             yawn_consecutive_frames = 0
                             currently_yawning = False
 
-                    # Trigger alarm on 3 yawns within 2 minutes
                     if len(yawn_timestamps) >= 3 and not yawn_alarm_active:
                         yawn_alarm_active = True
                         yawn_alarm_start_time = current_time
@@ -248,8 +244,8 @@ async def telemetry_feed(websocket: WebSocket):
             if is_microsleep or yawn_alarm_active:
                 cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 255), 10)
 
-            display_frame = cv2.resize(frame, (640, 360))
-            _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
+            display_frame = cv2.resize(frame, (480, 270))
+            _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
             jpg_as_text = base64.b64encode(buffer).decode('utf-8')
 
             telemetry_payload = {
@@ -265,14 +261,11 @@ async def telemetry_feed(websocket: WebSocket):
             }
 
             await websocket.send_json(telemetry_payload)
-            await asyncio.sleep(0.03)
 
     except WebSocketDisconnect:
         print("[-] Client disconnected.")
     except Exception as e:
         print(f"[!] Server exception: {e}")
-    finally:
-        cap.release()
 
 if __name__ == "__main__":
     import uvicorn

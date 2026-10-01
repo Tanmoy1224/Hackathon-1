@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldAlert, Eye, Activity, Zap, Terminal, AlertTriangle, 
-  Volume2, VolumeX, Flame, BellRing, Cpu, Wifi, Radio, Compass, TrendingUp, ChevronDown
+  Volume2, VolumeX, Flame, BellRing, Radio, Compass, TrendingUp, ChevronDown, Camera
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -18,8 +18,9 @@ export default function App() {
   const [camFrame, setCamFrame] = useState(null);
   const [audioMuted, setAudioMuted] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
-  const [fps, setFps] = useState(31.2);
+  const [fps, setFps] = useState(25.0);
   const [telemetryHistory, setTelemetryHistory] = useState([]);
+  const [cameraActive, setCameraActive] = useState(false);
 
   const earThreshold = 0.22;
   const marThreshold = 0.45;
@@ -30,6 +31,11 @@ export default function App() {
   const osc2Ref = useRef(null);
   const gainNodeRef = useRef(null);
   const isPlayingRef = useRef(false);
+
+  // Hidden video and canvas elements for client camera capture
+  const localVideoRef = useRef(null);
+  const hiddenCanvasRef = useRef(null);
+  const socketRef = useRef(null);
 
   const initAudio = () => {
     try {
@@ -110,12 +116,63 @@ export default function App() {
     return () => stopAlarmSound();
   }, [isMicrosleep, isYawnWarning, alertnessScore, audioMuted]);
 
+  // Request browser camera on whoever's computer visits the link
+  useEffect(() => {
+    async function startClientCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 480 }, height: { ideal: 360 }, facingMode: "user" },
+          audio: false
+        });
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+          setCameraActive(true);
+        }
+      } catch (err) {
+        console.error("Camera access error:", err);
+        alert("Camera access denied or unavailable. Please allow camera permissions in your browser.");
+      }
+    }
+    startClientCamera();
+
+    return () => {
+      if (localVideoRef.current && localVideoRef.current.srcObject) {
+        localVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  // WebSocket Connection & Frame Streaming Loop
   useEffect(() => {
     let socket;
     let frameTimes = [];
+    let frameInterval = null;
+
     const connectWs = () => {
+      // Points to your active ngrok tunnel
       socket = new WebSocket('wss://guidable-imprecise-canine.ngrok-free.dev/ws/telemetry');
-      socket.onopen = () => setWsConnected(true);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        setWsConnected(true);
+
+        // Start sending client's browser video frames every 50ms (~20 FPS)
+        frameInterval = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN && localVideoRef.current && hiddenCanvasRef.current) {
+            const video = localVideoRef.current;
+            const canvas = hiddenCanvasRef.current;
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+              canvas.width = 480;
+              canvas.height = 360;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+              socket.send(JSON.stringify({ image: dataUrl }));
+            }
+          }
+        }, 50);
+      };
+
       socket.onmessage = (event) => {
         try {
           const now = performance.now();
@@ -153,15 +210,24 @@ export default function App() {
           console.error("Payload error:", err);
         }
       };
+
       socket.onclose = () => {
         setWsConnected(false);
+        if (frameInterval) clearInterval(frameInterval);
         setTimeout(connectWs, 2000);
       };
-      socket.onerror = () => setWsConnected(false);
+
+      socket.onerror = () => {
+        setWsConnected(false);
+        if (frameInterval) clearInterval(frameInterval);
+      };
     };
 
     connectWs();
-    return () => socket && socket.close();
+    return () => {
+      if (frameInterval) clearInterval(frameInterval);
+      if (socket) socket.close();
+    };
   }, []);
 
   const getSystemStatus = () => {
@@ -183,7 +249,11 @@ export default function App() {
       onClick={initAudio} 
       className="min-h-screen w-full bg-[#05070D] text-slate-100 font-mono select-none relative overflow-x-hidden"
     >
-      {/* Background Cyber Grid */}
+      {/* Hidden elements capturing current client device video */}
+      <video ref={localVideoRef} autoPlay playsInline muted className="hidden" />
+      <canvas ref={hiddenCanvasRef} className="hidden" />
+
+      {/* Cyber Grid Background */}
       <div 
         className="fixed inset-0 pointer-events-none opacity-15"
         style={{
@@ -192,12 +262,10 @@ export default function App() {
         }}
       />
 
-      {/* ========================================================= */}
-      {/* SECTION 1: FRONT SCREEN COCKPIT (FITS 100% WITHOUT SCROLL) */}
-      {/* ========================================================= */}
+      {/* SECTION 1: FRONT SCREEN COCKPIT (Zero Scroll) */}
       <div className="h-screen w-full p-4 flex flex-col justify-between box-border relative z-10">
         
-        {/* TOP POPUP MICROSLEEP ALERT */}
+        {/* POPUP ALERT BANNER */}
         {isMicrosleep && (
           <div className="absolute top-2 left-6 right-6 z-50 bg-red-600/95 text-white py-2 px-5 rounded-2xl border-2 border-red-300 flex items-center justify-between animate-pulse shadow-[0_0_35px_rgba(255,0,0,0.8)] backdrop-blur-md">
             <div className="flex items-center space-x-3">
@@ -217,7 +285,7 @@ export default function App() {
           </div>
         )}
 
-        {/* COMPACT TOP HEADER */}
+        {/* HEADER BAR */}
         <header className="flex items-center justify-between border border-cyan-900/40 bg-[#090D16]/90 backdrop-blur-md rounded-2xl px-4 py-2 shadow-[0_2px_20px_rgba(0,255,255,0.05)]">
           <div className="flex items-center space-x-3">
             <div className="p-2 rounded-xl bg-cyan-950 border border-cyan-500/40 text-cyan-400">
@@ -249,7 +317,7 @@ export default function App() {
               onTouchStart={() => startAlarmSound()}
               onTouchEnd={() => stopAlarmSound()}
               className="px-3 py-1 rounded-xl bg-red-950/70 hover:bg-red-900 text-red-300 border border-red-700/60 text-xs font-bold flex items-center space-x-1.5 transition active:scale-95"
-              title="Hold to test alarm"
+              title="Hold to test siren"
             >
               <BellRing className="w-3.5 h-3.5 text-red-400" />
               <span>TEST SIREN</span>
@@ -258,7 +326,7 @@ export default function App() {
             <div className="flex items-center space-x-1.5 bg-slate-900 px-2.5 py-1 rounded-xl border border-slate-800 text-xs">
               <Radio className={`w-3 h-3 ${wsConnected ? 'text-emerald-400 animate-spin' : 'text-red-500'}`} />
               <span className={wsConnected ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>
-                {wsConnected ? 'SYNCED' : 'DISCONNECTED'}
+                {wsConnected ? 'SYNCED' : 'CONNECTING'}
               </span>
             </div>
 
@@ -277,16 +345,16 @@ export default function App() {
           </div>
         </header>
 
-        {/* MAIN HUD CLUSTER (50% LEFT CARDS, 50% RIGHT LIVE CHART) */}
+        {/* MAIN HUD CLUSTER */}
         <div className="grid grid-cols-12 gap-4 flex-1 my-3 overflow-hidden items-stretch">
           
-          {/* LEFT COLUMN: TELEMETRY TILES (6 COLUMNS) */}
+          {/* LEFT TELEMETRY TILES (6 COLUMNS) */}
           <div className="col-span-6 flex flex-col justify-between space-y-3">
             
             {/* ROW 1: ALERTNESS SPEEDOMETER + YAWN PIP TILE */}
             <div className="grid grid-cols-2 gap-3 flex-1">
               
-              {/* RADIAL SPEEDOMETER */}
+              {/* SPEEDOMETER */}
               <div className="p-3 rounded-2xl border border-cyan-900/40 bg-[#0B0F19]/90 backdrop-blur-md flex flex-col items-center justify-between shadow-xl">
                 <span className="text-slate-400 font-sans uppercase font-bold text-[11px] flex items-center gap-1.5">
                   <Zap className="w-3.5 h-3.5 text-cyan-400" /> Alertness Index
@@ -326,7 +394,7 @@ export default function App() {
                 <span className="text-[10px] text-cyan-400/80 font-mono">EDGE LOGGING NOMINAL</span>
               </div>
 
-              {/* YAWN PIP GAUGE */}
+              {/* YAWN COUNTER */}
               <div className={`p-3 rounded-2xl border flex flex-col justify-between transition-all shadow-xl ${
                 yawnCount >= 3 ? 'bg-red-950/40 border-red-500/70 shadow-[0_0_20px_rgba(255,0,0,0.3)]' : 'bg-[#0B0F19]/90 border-cyan-900/40'
               }`}>
@@ -370,7 +438,7 @@ export default function App() {
 
             </div>
 
-            {/* ROW 2: EAR & MAR METRIC TILES */}
+            {/* ROW 2: EAR & MAR */}
             <div className="grid grid-cols-2 gap-3 flex-1">
               
               {/* EAR CARD */}
@@ -465,7 +533,7 @@ export default function App() {
 
           </div>
 
-          {/* RIGHT COLUMN: FULL-SIZE LIVE EAR VS MAR CHART (6 COLUMNS) */}
+          {/* RIGHT LIVE CHART (6 COLUMNS) */}
           <div className="col-span-6 bg-[#0B0F19]/90 border border-cyan-900/50 rounded-2xl p-4 shadow-xl backdrop-blur-md flex flex-col justify-between">
             <div>
               <div className="flex items-center justify-between mb-2">
@@ -488,11 +556,10 @@ export default function App() {
                 </div>
               </div>
               <p className="text-[11px] text-slate-500 font-sans">
-                Continuous eye aspect ratio vs mouth aspect ratio telemetry streams logged at ~30Hz.
+                Continuous eye aspect ratio vs mouth aspect ratio telemetry streams logged at ~25Hz.
               </p>
             </div>
 
-            {/* Recharts Container Scaling with full available height */}
             <div className="h-[280px] w-full my-2">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={telemetryHistory} margin={{ top: 8, right: 12, left: -25, bottom: 0 }}>
@@ -524,29 +591,15 @@ export default function App() {
                     label={{ value: 'Yawn Limit', fill: '#FFB800', fontSize: 9, position: 'right' }} 
                   />
 
-                  <Line 
-                    type="monotone" 
-                    dataKey="EAR" 
-                    stroke="#00F0FF" 
-                    strokeWidth={2} 
-                    dot={false} 
-                    isAnimationActive={false} 
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="MAR" 
-                    stroke="#FFB800" 
-                    strokeWidth={2} 
-                    dot={false} 
-                    isAnimationActive={false} 
-                  />
+                  <Line type="monotone" dataKey="EAR" stroke="#00F0FF" strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="MAR" stroke="#FFB800" strokeWidth={2} dot={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
 
             <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500 font-mono">
               <span>STREAM BUFFER: 30 SAMPLES</span>
-              <span className="text-cyan-400 font-bold">FR-6 TELEMETRY LOG ACTIVE</span>
+              <span className="text-cyan-400 font-bold">CLIENT CAMERA TELEMETRY ACTIVE</span>
             </div>
           </div>
 
@@ -560,7 +613,7 @@ export default function App() {
             onClick={() => window.scrollTo({ top: window.innerHeight, behavior: 'smooth' })}
             className="flex items-center space-x-1.5 text-cyan-400 hover:text-cyan-300 font-bold bg-cyan-950/60 px-3 py-1 rounded-full border border-cyan-800 transition"
           >
-            <span>SCROLL DOWN FOR LIVE CAMERA TELECAST</span>
+            <span>SCROLL DOWN FOR PROCESSED CAMERA TELECAST</span>
             <ChevronDown className="w-4 h-4 animate-bounce" />
           </button>
 
@@ -569,18 +622,15 @@ export default function App() {
 
       </div>
 
-      {/* ========================================================= */}
-      {/* SECTION 2: LIVE CAMERA TELECAST (SCROLL DOWN TO REVEAL) */}
-      {/* ========================================================= */}
+      {/* SECTION 2: LIVE CAMERA TELECAST (Scrolled view) */}
       <div className="min-h-screen w-full p-6 flex flex-col justify-center items-center relative z-10 border-t-2 border-cyan-900/40 bg-[#070A12]/95 backdrop-blur-lg">
-        
         <div className="w-full max-w-4xl bg-[#0B0F19]/90 border border-cyan-900/60 rounded-3xl p-6 shadow-2xl flex flex-col justify-between">
           
           <div className="w-full flex items-center justify-between mb-4">
             <div className="flex items-center space-x-2">
-              <span className="w-3 h-3 rounded-full bg-red-500 animate-ping" />
+              <Camera className="w-4 h-4 text-cyan-400" />
               <h2 className="text-sm uppercase font-extrabold tracking-wider text-slate-200 font-sans">
-                Driver Diagnostic Camera Telecast (Testing Feed)
+                Driver Diagnostic Camera Telecast (Local Device Stream)
               </h2>
             </div>
 
@@ -589,13 +639,12 @@ export default function App() {
                 FPS: {fps}
               </span>
               <span className="bg-cyan-950 px-2.5 py-1 rounded-lg border border-cyan-800">
-                LATENCY: &lt; 35MS
+                {cameraActive ? "WEBCAM: ACTIVE" : "WEBCAM: WAITING"}
               </span>
             </div>
           </div>
 
-          {/* Large Video Box */}
-          <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-cyan-900/60 flex items-center justify-center shadow-2xl group">
+          <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-cyan-900/60 flex items-center justify-center shadow-2xl">
             {camFrame ? (
               <img 
                 src={camFrame} 
@@ -605,33 +654,26 @@ export default function App() {
             ) : (
               <div className="text-cyan-500 text-sm flex flex-col items-center space-y-3">
                 <Compass className="w-8 h-8 animate-spin" />
-                <span className="tracking-widest">CONNECTING TO CAMERA STREAM...</span>
+                <span className="tracking-widest">AWAITING BROWSER CAMERA STREAM...</span>
               </div>
             )}
 
-            {/* Target Reticles */}
             <div className="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
             <div className="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-cyan-400 pointer-events-none" />
             <div className="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-cyan-400 pointer-events-none" />
             <div className="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
-
-            <div className="absolute top-4 left-14 pointer-events-none bg-black/60 backdrop-blur-sm px-3 py-1 rounded text-xs text-cyan-300 border border-cyan-800">
-              468 3D MESH TRACKING
-            </div>
           </div>
 
           <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-            <span>MEDIA PIPE IRIS-REFLECTIVE EXTRACTION</span>
+            <span>CLIENT HARDWARE CAMERA CAPTURE VIA WEBRTC / MEDIA-DEVICES</span>
             <button 
               onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
               className="text-cyan-400 hover:underline font-bold"
             >
-              ↑ Back to Main Cockpit Dashboard
+              ↑ Back to Cockpit Dashboard
             </button>
           </div>
-
         </div>
-
       </div>
 
     </div>
