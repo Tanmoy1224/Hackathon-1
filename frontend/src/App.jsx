@@ -121,16 +121,20 @@ export default function App() {
     return () => stopAlarmSound();
   }, [isMicrosleep, isYawnWarning, alertnessScore, audioMuted]);
 
-  // Request client camera access in browser
+  // Request browser camera and ensure the stream actually starts rendering
   useEffect(() => {
+    let stream = null;
     async function startClientCamera() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 480 }, height: { ideal: 360 }, facingMode: "user" },
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: "user" },
           audio: false
         });
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.onloadedmetadata = () => {
+            localVideoRef.current.play().catch(e => console.warn("Video play error:", e));
+          };
         }
       } catch (err) {
         console.error("Camera access error:", err);
@@ -139,8 +143,8 @@ export default function App() {
     startClientCamera();
 
     return () => {
-      if (localVideoRef.current && localVideoRef.current.srcObject) {
-        localVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
       }
     };
   }, []);
@@ -250,8 +254,18 @@ export default function App() {
       onClick={initAudio} 
       className="min-h-screen bg-[#070A10] text-slate-100 font-sans p-4 md:p-6 flex flex-col justify-between select-none"
     >
-      <video ref={localVideoRef} autoPlay playsInline muted className="hidden" />
-      <canvas ref={hiddenCanvasRef} className="hidden" />
+      {/* Positioned off-screen with fixed coordinates so the browser engine paints frames */}
+      <video 
+        ref={localVideoRef} 
+        autoPlay 
+        playsInline 
+        muted 
+        style={{ position: 'fixed', top: '-9999px', left: '-9999px', width: '320px', height: '240px', opacity: 0, pointerEvents: 'none' }} 
+      />
+      <canvas 
+        ref={hiddenCanvasRef} 
+        style={{ display: 'none' }} 
+      />
 
       {/* 1. MICROSLEEP & AUTONOMOUS BRAKE BANNER */}
       {isMicrosleep && (
