@@ -59,6 +59,10 @@ LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 MOUTH = [61, 291, 13, 14, 78, 308]
 
+FOREHEAD = 10
+NOSE_TIP = 1
+CHIN = 152
+
 def calculate_ear(eye_landmarks, landmarks, w, h):
     pts = np.array([[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in eye_landmarks])
     v1 = np.linalg.norm(pts[1] - pts[5])
@@ -71,6 +75,23 @@ def calculate_mar(mouth_landmarks, landmarks, w, h):
     v_dist = np.linalg.norm(pts[2] - pts[3])
     h_dist = np.linalg.norm(pts[0] - pts[1])
     return float(v_dist / (h_dist + 1e-6)), float(v_dist), float(h_dist)
+
+def calculate_head_pitch(landmarks, w, h):
+    forehead_y = landmarks[FOREHEAD].y * h
+    nose_y = landmarks[NOSE_TIP].y * h
+    chin_y = landmarks[CHIN].y * h
+
+    nose_z = landmarks[NOSE_TIP].z * w
+    chin_z = landmarks[CHIN].z * w
+
+    face_height = chin_y - forehead_y
+    if face_height <= 0:
+        return 0.4, False
+
+    vertical_ratio = (chin_y - nose_y) / face_height
+    # Looking down flattens vertical nose-to-chin distance or pushes nose Z forward
+    is_bowed = (vertical_ratio < 0.23) or ((chin_y - nose_y) < (0.16 * face_height))
+    return vertical_ratio, is_bowed
 
 @app.websocket("/ws/telemetry")
 async def telemetry_feed(websocket: WebSocket):
@@ -103,16 +124,14 @@ async def telemetry_feed(websocket: WebSocket):
     eye_closed_start_time = None
     CONSECUTIVE_CLOSED_LIMIT = 45
 
-    # 2-Minute Window Yawn Tracking
     yawn_timestamps = deque()
     currently_yawning = False
     yawn_consecutive_frames = 0
     MIN_YAWN_FRAMES = 20
 
-    # Auto-Reset Yawn Alarm Timer
     yawn_alarm_active = False
     yawn_alarm_start_time = None
-    YAWN_ALARM_DURATION = 3.5  # Siren lasts 3.5s then resets counter
+    YAWN_ALARM_DURATION = 3.5
 
     alertness_score = 100
 
@@ -128,7 +147,7 @@ async def telemetry_feed(websocket: WebSocket):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
 
-            # Purge yawns older than 2 minutes (120s)
+            # Purge yawns older than 2 minutes (120 seconds)
             while yawn_timestamps and (current_time - yawn_timestamps[0] > 120):
                 yawn_timestamps.popleft()
 
@@ -137,12 +156,13 @@ async def telemetry_feed(websocket: WebSocket):
                 if current_time - yawn_alarm_start_time >= YAWN_ALARM_DURATION:
                     yawn_alarm_active = False
                     yawn_alarm_start_time = None
-                    yawn_timestamps.clear()  # Resets back to 0/3!
-                    print("[INFO] Yawn alarm duration completed. Counter reset to 0.")
+                    yawn_timestamps.clear()
+                    print("[INFO] Yawn alarm completed. Counter reset to 0/3.")
 
             ear_avg = 0.28
             mar = 0.15
             is_microsleep = False
+            is_head_bowed = False
 
             if results.multi_face_landmarks:
                 mesh = results.multi_face_landmarks[0].landmark
@@ -152,12 +172,15 @@ async def telemetry_feed(websocket: WebSocket):
                 ear_avg = (ear_l + ear_r) / 2.0
                 mar, v_dist, h_dist = calculate_mar(MOUTH, mesh, w, h)
 
+                # Check head pitch (prevents false eye closure when head bows)
+                _, is_head_bowed = calculate_head_pitch(mesh, w, h)
+
                 for idx in LEFT_EYE + RIGHT_EYE:
                     cv2.circle(frame, (int(mesh[idx].x * w), int(mesh[idx].y * h)), 1, (0, 255, 0), -1)
                 for idx in MOUTH:
                     cv2.circle(frame, (int(mesh[idx].x * w), int(mesh[idx].y * h)), 1, (0, 180, 255), -1)
 
-                # Eyeglasses dynamic calibration
+                # Dynamic glasses calibration (first 60 frames)
                 if not is_calibrated:
                     calibration_buffer.append(ear_avg)
                     cv2.putText(frame, f"CALIBRATING... {len(calibration_buffer)}/{CALIBRATION_LIMIT}", 
@@ -170,8 +193,15 @@ async def telemetry_feed(websocket: WebSocket):
                 else:
                     frame_buffer.append([ear_l, ear_r, ear_avg, mar])
 
-                    # Microsleep (45 frames / 1.5s)
-                    if ear_avg < ear_threshold:
+                    if is_head_bowed:
+                        # Driver's head is tilted down: reset eye closure counters
+                        consecutive_closed_frames = 0
+                        eye_closed_start_time = None
+                        alertness_score = max(50, alertness_score - 1)
+                        cv2.putText(frame, "HEAD BOWED / LOOKING DOWN", (20, 40),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+
+                    elif ear_avg < ear_threshold:
                         consecutive_closed_frames += 1
                         if eye_closed_start_time is None:
                             eye_closed_start_time = current_time
@@ -187,7 +217,7 @@ async def telemetry_feed(websocket: WebSocket):
                         eye_closed_start_time = None
                         alertness_score = min(100, alertness_score + 1)
 
-                    # Model Inference & Yawn Counter
+                    # Model Inference & Yawn Classification
                     if not is_microsleep and len(frame_buffer) == BUFFER_SIZE:
                         input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
                         with torch.no_grad():
@@ -229,7 +259,8 @@ async def telemetry_feed(websocket: WebSocket):
                 "consecutive_frames": int(consecutive_closed_frames),
                 "microsleep": bool(is_microsleep),
                 "yawn_count": int(len(yawn_timestamps)),
-                "yawn_alert": bool(yawn_alarm_active),
+                "yawn_warning": bool(yawn_alarm_active),
+                "head_down": bool(is_head_bowed),
                 "frame": f"data:image/jpeg;base64,{jpg_as_text}"
             }
 
