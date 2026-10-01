@@ -11,7 +11,7 @@ import torch.nn as nn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="VIGIL-AI Client-Camera Telemetry Bridge")
+app = FastAPI(title="VIGIL-AI Client Camera & Autonomous Braking Bridge")
 
 app.add_middleware(
     CORSMiddleware,
@@ -92,7 +92,7 @@ def calculate_head_pitch(landmarks, w, h):
 @app.websocket("/ws/telemetry")
 async def telemetry_feed(websocket: WebSocket):
     await websocket.accept()
-    print("[*] Client connected to /ws/telemetry (Client-side camera mode)")
+    print("[*] Client connected to /ws/telemetry with Autonomous Brake Control")
 
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
@@ -127,14 +127,12 @@ async def telemetry_feed(websocket: WebSocket):
 
     try:
         while True:
-            # Receive frame data directly from the client's browser webcam
             client_data = await websocket.receive_json()
             image_data = client_data.get("image")
 
             if not image_data:
                 continue
 
-            # Strip base64 prefix and decode image into OpenCV format
             if "," in image_data:
                 image_data = image_data.split(",")[1]
 
@@ -150,11 +148,9 @@ async def telemetry_feed(websocket: WebSocket):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
 
-            # Purge yawns older than 2 minutes (120 seconds)
             while yawn_timestamps and (current_time - yawn_timestamps[0] > 120):
                 yawn_timestamps.popleft()
 
-            # Handle Yawn Alarm Timeout and Counter Reset
             if yawn_alarm_active:
                 if current_time - yawn_alarm_start_time >= YAWN_ALARM_DURATION:
                     yawn_alarm_active = False
@@ -241,6 +237,55 @@ async def telemetry_feed(websocket: WebSocket):
                 consecutive_closed_frames = 0
                 eye_closed_start_time = None
 
+            # --- AUTONOMOUS BRAKING & CAN-BUS TELEMETRY PIPELINE ---
+            unresponsive_time = 0.0
+            brake_pressure = 0
+            vehicle_speed = 80
+            can_command = "0x018 [SYS_STANDBY_NOMINAL]"
+            intervention_stage = "CRUISE"
+            hazard_active = False
+
+            if is_microsleep and eye_closed_start_time is not None:
+                unresponsive_time = current_time - eye_closed_start_time
+
+                if unresponsive_time >= 20.0:
+                    # Stage 2: Controlled Emergency Safe Stop
+                    intervention_stage = "SAFE_STOP"
+                    elapsed_stop = unresponsive_time - 20.0
+                    brake_pressure = min(100, int(elapsed_stop * 18) + 40)
+                    vehicle_speed = max(0, 56 - int(elapsed_stop * 12))
+                    can_command = "0x028 [CMD: EMERGENCY_SAFE_STOP_FULL]"
+                    hazard_active = True
+                elif unresponsive_time >= 10.0:
+                    # Stage 1: Haptic Jolt Warning (3 pulses in 3-second intervals)
+                    intervention_stage = "HAPTIC_JOLT"
+                    elapsed_jolt = unresponsive_time - 10.0
+                    cycle_pos = elapsed_jolt % 3.0
+                    pulse_num = min(3, int(elapsed_jolt // 3.0) + 1)
+                    
+                    # Apply 85% brake pulse for first 0.85s of each 3-second interval
+                    if cycle_pos < 0.85 and pulse_num <= 3:
+                        brake_pressure = 85
+                    else:
+                        brake_pressure = 0
+
+                    vehicle_speed = max(50, 80 - (pulse_num * 8))
+                    can_command = f"0x130 [CMD: BRAKE_JOLT_PULSE_{pulse_num}/3]"
+                    hazard_active = False
+                else:
+                    # T: 0s to 9.9s -> Passive Warning & Countdown
+                    intervention_stage = "PRE_WARN"
+                    brake_pressure = 0
+                    vehicle_speed = 80
+                    can_command = "0x110 [STATUS: DRIVER_INATTENTIVE]"
+                    hazard_active = False
+            else:
+                intervention_stage = "CRUISE"
+                brake_pressure = 0
+                vehicle_speed = 80
+                can_command = "0x018 [SYS_STANDBY_NOMINAL]"
+                hazard_active = False
+
             if is_microsleep or yawn_alarm_active:
                 cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 255), 10)
 
@@ -257,6 +302,13 @@ async def telemetry_feed(websocket: WebSocket):
                 "yawn_count": int(len(yawn_timestamps)),
                 "yawn_warning": bool(yawn_alarm_active),
                 "head_down": bool(is_head_bowed),
+                # Autonomous Braking States:
+                "unresponsive_time": round(float(unresponsive_time), 1),
+                "brake_pressure": int(brake_pressure),
+                "vehicle_speed": int(vehicle_speed),
+                "can_command": str(can_command),
+                "intervention_stage": str(intervention_stage),
+                "hazard_active": bool(hazard_active),
                 "frame": f"data:image/jpeg;base64,{jpg_as_text}"
             }
 
