@@ -117,7 +117,6 @@ async def telemetry_feed(websocket: WebSocket):
     yawn_timestamps = deque()
     currently_yawning = False
     yawn_consecutive_frames = 0
-    MIN_YAWN_FRAMES = 20
 
     yawn_alarm_active = False
     yawn_alarm_start_time = None
@@ -148,6 +147,7 @@ async def telemetry_feed(websocket: WebSocket):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
 
+            # Purge yawns older than 2 minutes (120 seconds)
             while yawn_timestamps and (current_time - yawn_timestamps[0] > 120):
                 yawn_timestamps.popleft()
 
@@ -212,21 +212,30 @@ async def telemetry_feed(websocket: WebSocket):
                         eye_closed_start_time = None
                         alertness_score = min(100, alertness_score + 1)
 
-                    if not is_microsleep and len(frame_buffer) == BUFFER_SIZE:
-                        input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
-                        with torch.no_grad():
-                            logits = model(input_tensor)
-                            pred_class = int(torch.argmax(torch.softmax(logits, dim=1), dim=1).item())
+                    # --- REVISED HYBRID YAWN DETECTION PIPELINE ---
+                    if not is_microsleep:
+                        geometric_yawn = (mar >= 0.40) and (v_dist >= (0.35 * h_dist))
+                        
+                        model_yawn = False
+                        if len(frame_buffer) == BUFFER_SIZE:
+                            input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
+                            with torch.no_grad():
+                                logits = model(input_tensor)
+                                pred_class = int(torch.argmax(torch.softmax(logits, dim=1), dim=1).item())
+                            model_yawn = (pred_class == 2)
 
-                        is_yawn = (pred_class == 2) and (mar >= 0.45) and (v_dist >= (0.42 * h_dist))
-                        if is_yawn:
+                        # Trigger if geometric yawn is verified OR model classifies yawn with elevated MAR
+                        if geometric_yawn or (model_yawn and mar >= 0.35):
                             yawn_consecutive_frames += 1
-                            if yawn_consecutive_frames >= MIN_YAWN_FRAMES and not currently_yawning:
+                            if yawn_consecutive_frames >= 8 and not currently_yawning:
                                 yawn_timestamps.append(current_time)
                                 currently_yawning = True
+                                print(f"[EVENT] Yawn recorded: {len(yawn_timestamps)}/3")
                         else:
                             yawn_consecutive_frames = 0
-                            currently_yawning = False
+                            # Unlock yawn flag when mouth closes back toward resting baseline
+                            if mar < 0.28:
+                                currently_yawning = False
 
                     if len(yawn_timestamps) >= 3 and not yawn_alarm_active:
                         yawn_alarm_active = True
