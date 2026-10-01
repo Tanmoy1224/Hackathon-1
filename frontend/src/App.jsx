@@ -15,7 +15,6 @@ export default function App() {
   const [isYawnWarning, setIsYawnWarning] = useState(false);
   const [isHeadDown, setIsHeadDown] = useState(false);
   const [yawnCount, setYawnCount] = useState(0);
-  const [camFrame, setCamFrame] = useState(null);
   const [audioMuted, setAudioMuted] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
   const [telemetryHistory, setTelemetryHistory] = useState([]);
@@ -29,8 +28,8 @@ export default function App() {
   const [hazardActive, setHazardActive] = useState(false);
 
   const earThreshold = 0.22;
-  const marThreshold = 0.45;
-  const frameThreshold = 45;
+  const marThreshold = 0.38;
+  const frameThreshold = 40;
 
   const audioCtxRef = useRef(null);
   const osc1Ref = useRef(null);
@@ -39,7 +38,8 @@ export default function App() {
   const isPlayingRef = useRef(false);
 
   const localVideoRef = useRef(null);
-  const hiddenCanvasRef = useRef(null);
+  const captureCanvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
   const socketRef = useRef(null);
 
   const initAudio = () => {
@@ -121,20 +121,17 @@ export default function App() {
     return () => stopAlarmSound();
   }, [isMicrosleep, isYawnWarning, alertnessScore, audioMuted]);
 
-  // Request browser camera and ensure the stream actually starts rendering
+  // Request HD webcam from client browser
   useEffect(() => {
     let stream = null;
     async function startClientCamera() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 320 }, height: { ideal: 240 }, facingMode: "user" },
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
           audio: false
         });
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
-          localVideoRef.current.onloadedmetadata = () => {
-            localVideoRef.current.play().catch(e => console.warn("Video play error:", e));
-          };
         }
       } catch (err) {
         console.error("Camera access error:", err);
@@ -143,13 +140,47 @@ export default function App() {
     startClientCamera();
 
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      if (stream) stream.getTracks().forEach(track => track.stop());
     };
   }, []);
 
-  // Lock-step Throttled WebSocket Stream
+  // Draw landmark points smoothly over the live hardware video
+  const drawLandmarks = (eyePts, mouthPts, isMicrosleepAlert) => {
+    const canvas = overlayCanvasRef.current;
+    const video = localVideoRef.current;
+    if (!canvas || !video) return;
+
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.clientWidth;
+    canvas.height = video.clientHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (isMicrosleepAlert) {
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(0, 0, canvas.width, canvas.height);
+    }
+
+    if (eyePts && eyePts.length > 0) {
+      ctx.fillStyle = '#10b981';
+      for (const [x, y] of eyePts) {
+        ctx.beginPath();
+        ctx.arc(x * canvas.width, y * canvas.height, 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+
+    if (mouthPts && mouthPts.length > 0) {
+      ctx.fillStyle = '#f59e0b';
+      for (const [x, y] of mouthPts) {
+        ctx.beginPath();
+        ctx.arc(x * canvas.width, y * canvas.height, 3.5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  };
+
+  // High-performance streaming loop (transmits lightweight 480x360 frames)
   useEffect(() => {
     let socket;
     let isWaitingForResponse = false;
@@ -161,18 +192,18 @@ export default function App() {
         socket.readyState === WebSocket.OPEN &&
         !isWaitingForResponse &&
         localVideoRef.current &&
-        hiddenCanvasRef.current
+        captureCanvasRef.current
       ) {
         const video = localVideoRef.current;
-        const canvas = hiddenCanvasRef.current;
+        const canvas = captureCanvasRef.current;
 
         if (video.videoWidth > 0 && video.videoHeight > 0) {
-          canvas.width = 320;
-          canvas.height = 240;
+          canvas.width = 480;
+          canvas.height = 360;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          
-          const dataUrl = canvas.toDataURL('image/jpeg', 0.45);
+
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.55);
           isWaitingForResponse = true;
           socket.send(JSON.stringify({ image: dataUrl }));
         }
@@ -205,7 +236,6 @@ export default function App() {
           if (data.yawn_warning !== undefined) setIsYawnWarning(data.yawn_warning);
           if (data.yawn_count !== undefined) setYawnCount(data.yawn_count);
           if (data.head_down !== undefined) setIsHeadDown(data.head_down);
-          if (data.frame) setCamFrame(data.frame);
 
           if (data.unresponsive_time !== undefined) setUnresponsiveTime(data.unresponsive_time);
           if (data.brake_pressure !== undefined) setBrakePressure(data.brake_pressure);
@@ -213,6 +243,8 @@ export default function App() {
           if (data.can_command !== undefined) setCanCommand(data.can_command);
           if (data.intervention_stage !== undefined) setInterventionStage(data.intervention_stage);
           if (data.hazard_active !== undefined) setHazardActive(data.hazard_active);
+
+          drawLandmarks(data.eye_pts, data.mouth_pts, data.microsleep);
 
           const timeLabel = new Date().toLocaleTimeString().split(' ')[0];
           setTelemetryHistory(prev => [
@@ -254,18 +286,7 @@ export default function App() {
       onClick={initAudio} 
       className="min-h-screen bg-[#070A10] text-slate-100 font-sans p-4 md:p-6 flex flex-col justify-between select-none"
     >
-      {/* Positioned off-screen with fixed coordinates so the browser engine paints frames */}
-      <video 
-        ref={localVideoRef} 
-        autoPlay 
-        playsInline 
-        muted 
-        style={{ position: 'fixed', top: '-9999px', left: '-9999px', width: '320px', height: '240px', opacity: 0, pointerEvents: 'none' }} 
-      />
-      <canvas 
-        ref={hiddenCanvasRef} 
-        style={{ display: 'none' }} 
-      />
+      <canvas ref={captureCanvasRef} style={{ display: 'none' }} />
 
       {/* 1. MICROSLEEP & AUTONOMOUS BRAKE BANNER */}
       {isMicrosleep && (
@@ -611,32 +632,32 @@ export default function App() {
         {/* RIGHT COLUMN: CAMERA FEED + LIVE TELEMETRY GRAPH (RIGHT 6 COLUMNS) */}
         <div className="lg:col-span-6 flex flex-col space-y-4">
           
-          {/* CAMERA FEED */}
+          {/* CAMERA FEED - DIRECT LOCAL HARDWARE STREAM WITH OVERLAY */}
           <div className="bg-[#0D131F] border border-cyan-900/40 rounded-xl p-4 shadow-xl flex flex-col items-center justify-center">
             <div className="w-full flex items-center justify-between mb-3 px-1">
               <div className="flex items-center space-x-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
                 <span className="text-xs uppercase font-bold tracking-wider text-slate-300">
-                  Driver Diagnostic Camera Feed
+                  Driver Diagnostic Camera Feed (Hardware HD)
                 </span>
               </div>
               <span className="text-[10px] font-mono bg-cyan-950 text-cyan-400 px-2 py-0.5 rounded border border-cyan-900">
-                MEDIA PIPE 3D MESH
+                ZERO-LATENCY HUD
               </span>
             </div>
 
             <div className="w-full aspect-video bg-black rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center relative">
-              {camFrame ? (
-                <img 
-                  src={camFrame} 
-                  alt="Driver Camera Diagnostic" 
-                  className="w-full h-full object-cover" 
-                />
-              ) : (
-                <div className="text-slate-600 text-xs font-mono animate-pulse">
-                  CONNECTING TO CAMERA...
-                </div>
-              )}
+              <video 
+                ref={localVideoRef} 
+                autoPlay 
+                playsInline 
+                muted 
+                className="w-full h-full object-cover" 
+              />
+              <canvas 
+                ref={overlayCanvasRef} 
+                className="absolute inset-0 pointer-events-none w-full h-full"
+              />
             </div>
           </div>
 

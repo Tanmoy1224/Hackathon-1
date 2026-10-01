@@ -11,7 +11,7 @@ import torch.nn as nn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="VIGIL-AI Client-Camera Telemetry Bridge")
+app = FastAPI(title="VIGIL-AI Ultra-Low Latency Telemetry Bridge")
 
 app.add_middleware(
     CORSMiddleware,
@@ -92,7 +92,7 @@ def calculate_head_pitch(landmarks, w, h):
 @app.websocket("/ws/telemetry")
 async def telemetry_feed(websocket: WebSocket):
     await websocket.accept()
-    print("[*] Client connected to /ws/telemetry (Browser Camera Stream)")
+    print("[*] Client connected to /ws/telemetry (Native Overlay Engine)")
 
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
@@ -106,13 +106,13 @@ async def telemetry_feed(websocket: WebSocket):
     frame_buffer = deque(maxlen=BUFFER_SIZE)
 
     calibration_buffer = []
-    CALIBRATION_LIMIT = 60
+    CALIBRATION_LIMIT = 45
     is_calibrated = False
     ear_threshold = 0.22
 
     consecutive_closed_frames = 0
     eye_closed_start_time = None
-    CONSECUTIVE_CLOSED_LIMIT = 45
+    CONSECUTIVE_CLOSED_LIMIT = 40
 
     yawn_timestamps = deque()
     currently_yawning = False
@@ -147,7 +147,6 @@ async def telemetry_feed(websocket: WebSocket):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb_frame)
 
-            # Purge yawns older than 2 minutes (120 seconds)
             while yawn_timestamps and (current_time - yawn_timestamps[0] > 120):
                 yawn_timestamps.popleft()
 
@@ -161,6 +160,8 @@ async def telemetry_feed(websocket: WebSocket):
             mar = 0.15
             is_microsleep = False
             is_head_bowed = False
+            eye_pts = []
+            mouth_pts = []
 
             if results.multi_face_landmarks:
                 mesh = results.multi_face_landmarks[0].landmark
@@ -172,15 +173,12 @@ async def telemetry_feed(websocket: WebSocket):
 
                 _, is_head_bowed = calculate_head_pitch(mesh, w, h)
 
-                for idx in LEFT_EYE + RIGHT_EYE:
-                    cv2.circle(frame, (int(mesh[idx].x * w), int(mesh[idx].y * h)), 1, (0, 255, 0), -1)
-                for idx in MOUTH:
-                    cv2.circle(frame, (int(mesh[idx].x * w), int(mesh[idx].y * h)), 1, (0, 180, 255), -1)
+                # Send normalized coordinates (0.0 to 1.0) so browser paints dots with 0 latency
+                eye_pts = [[round(mesh[idx].x, 3), round(mesh[idx].y, 3)] for idx in (LEFT_EYE + RIGHT_EYE)]
+                mouth_pts = [[round(mesh[idx].x, 3), round(mesh[idx].y, 3)] for idx in MOUTH]
 
                 if not is_calibrated:
                     calibration_buffer.append(ear_avg)
-                    cv2.putText(frame, f"CALIBRATING... {len(calibration_buffer)}/{CALIBRATION_LIMIT}", 
-                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
                     if len(calibration_buffer) >= CALIBRATION_LIMIT:
                         baseline_ear = float(np.percentile(calibration_buffer, 75))
                         ear_threshold = round(baseline_ear * 0.70, 2)
@@ -193,8 +191,6 @@ async def telemetry_feed(websocket: WebSocket):
                         consecutive_closed_frames = 0
                         eye_closed_start_time = None
                         alertness_score = max(50, alertness_score - 1)
-                        cv2.putText(frame, "HEAD BOWED / LOOKING DOWN", (20, 40),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
                     elif ear_avg < ear_threshold:
                         consecutive_closed_frames += 1
@@ -212,10 +208,9 @@ async def telemetry_feed(websocket: WebSocket):
                         eye_closed_start_time = None
                         alertness_score = min(100, alertness_score + 1)
 
-                    # --- REVISED HYBRID YAWN DETECTION PIPELINE ---
+                    # Robust Yawn Detection
                     if not is_microsleep:
-                        geometric_yawn = (mar >= 0.40) and (v_dist >= (0.35 * h_dist))
-                        
+                        geometric_yawn = (mar >= 0.38) and (v_dist >= (0.32 * h_dist))
                         model_yawn = False
                         if len(frame_buffer) == BUFFER_SIZE:
                             input_tensor = torch.tensor(np.array([list(frame_buffer)]), dtype=torch.float32).to(device)
@@ -224,16 +219,14 @@ async def telemetry_feed(websocket: WebSocket):
                                 pred_class = int(torch.argmax(torch.softmax(logits, dim=1), dim=1).item())
                             model_yawn = (pred_class == 2)
 
-                        # Trigger if geometric yawn is verified OR model classifies yawn with elevated MAR
-                        if geometric_yawn or (model_yawn and mar >= 0.35):
+                        if geometric_yawn or (model_yawn and mar >= 0.33):
                             yawn_consecutive_frames += 1
-                            if yawn_consecutive_frames >= 8 and not currently_yawning:
+                            if yawn_consecutive_frames >= 6 and not currently_yawning:
                                 yawn_timestamps.append(current_time)
                                 currently_yawning = True
                                 print(f"[EVENT] Yawn recorded: {len(yawn_timestamps)}/3")
                         else:
                             yawn_consecutive_frames = 0
-                            # Unlock yawn flag when mouth closes back toward resting baseline
                             if mar < 0.28:
                                 currently_yawning = False
 
@@ -291,13 +284,6 @@ async def telemetry_feed(websocket: WebSocket):
                 can_command = "0x018 [SYS_STANDBY_NOMINAL]"
                 hazard_active = False
 
-            if is_microsleep or yawn_alarm_active:
-                cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 255), 8)
-
-            display_frame = cv2.resize(frame, (320, 240))
-            _, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
-            jpg_as_text = base64.b64encode(buffer).decode('utf-8')
-
             telemetry_payload = {
                 "ear": round(float(ear_avg), 3),
                 "mar": round(float(mar), 3),
@@ -313,7 +299,9 @@ async def telemetry_feed(websocket: WebSocket):
                 "can_command": str(can_command),
                 "intervention_stage": str(intervention_stage),
                 "hazard_active": bool(hazard_active),
-                "frame": f"data:image/jpeg;base64,{jpg_as_text}"
+                "eye_pts": eye_pts,
+                "mouth_pts": mouth_pts,
+                "calibrated": is_calibrated
             }
 
             await websocket.send_json(telemetry_payload)
