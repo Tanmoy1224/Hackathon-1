@@ -114,7 +114,7 @@ export default function App() {
     let socket;
     let frameTimes = [];
     const connectWs = () => {
-      socket = new WebSocket('ws://localhost:8000/ws/telemetry');
+      socket = new WebSocket('wss://guidable-imprecise-canine.ngrok-free.dev/ws/telemetry');
       socket.onopen = () => setWsConnected(true);
       socket.onmessage = (event) => {
         try {
